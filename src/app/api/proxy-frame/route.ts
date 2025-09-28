@@ -125,7 +125,7 @@ function rewriteHtmlContent(content: string, originalUrl: URL, baseProxyUrl: str
         fullUrl = baseUrl + currentPath + url;
       }
 
-      const proxyUrl = createProxyUrl(fullUrl, baseProxyUrl);
+      const proxyUrl = createProxyUrl(fullUrl, browserAccessibleBaseUrl);
       return `action="${proxyUrl}"`;
     } catch {
       return match;
@@ -172,7 +172,7 @@ function rewriteHtmlContent(content: string, originalUrl: URL, baseProxyUrl: str
         fullUrl = baseUrl + currentPath + url;
       }
 
-      const proxyUrl = createProxyUrl(fullUrl, baseProxyUrl);
+      const proxyUrl = createProxyUrl(fullUrl, browserAccessibleBaseUrl);
       return `content="${delay};url=${proxyUrl}"`;
     } catch {
       return match;
@@ -186,7 +186,7 @@ function rewriteHtmlContent(content: string, originalUrl: URL, baseProxyUrl: str
   const injectedScript = `
     <script>
       (function() {
-        const PROXY_BASE = '${baseProxyUrl}/api/proxy-frame?u=';
+        const PROXY_BASE = window.location.origin + '/api/proxy-frame?u=';
         const ORIGINAL_BASE = '${baseUrl}';
 
         function encodeUrl(url) {
@@ -299,7 +299,7 @@ function rewriteHtmlContent(content: string, originalUrl: URL, baseProxyUrl: str
                 const links = node.querySelectorAll ? node.querySelectorAll('a[href]') : [];
                 links.forEach(function(link) {
                   const href = link.getAttribute('href');
-                  if (href && !href.startsWith('#') && !href.startsWith('javascript:') && !href.includes('${baseProxyUrl}')) {
+                  if (href && !href.startsWith('#') && !href.startsWith('javascript:') && !href.includes('/api/proxy-frame')) {
                     const proxyUrl = createProxyUrl(href);
                     link.setAttribute('href', proxyUrl);
                   }
@@ -309,7 +309,7 @@ function rewriteHtmlContent(content: string, originalUrl: URL, baseProxyUrl: str
                 const forms = node.querySelectorAll ? node.querySelectorAll('form[action]') : [];
                 forms.forEach(function(form) {
                   const action = form.getAttribute('action');
-                  if (action && !action.includes('${baseProxyUrl}')) {
+                  if (action && !action.includes('/api/proxy-frame')) {
                     const proxyAction = createProxyUrl(action);
                     form.setAttribute('action', proxyAction);
                   }
@@ -452,7 +452,8 @@ export async function GET(request: NextRequest) {
 
     if (contentType.includes('text/html')) {
       // Comprehensive URL rewriting
-      processedContent = rewriteHtmlContent(content, validUrl, baseProxyUrl);
+      const requestHost = request.headers.get('host') || request.nextUrl.host;
+      processedContent = rewriteHtmlContent(content, validUrl, baseProxyUrl, requestHost);
 
       // Google-specific fixes
       if (isGoogle) {
@@ -548,7 +549,8 @@ export async function POST(request: NextRequest) {
 
     let processedContent = content;
     if (contentType.includes('text/html')) {
-      processedContent = rewriteHtmlContent(content, validUrl, baseProxyUrl);
+      const requestHost = request.headers.get('host') || request.nextUrl.host;
+      processedContent = rewriteHtmlContent(content, validUrl, baseProxyUrl, requestHost);
     }
 
     return new NextResponse(processedContent, {
