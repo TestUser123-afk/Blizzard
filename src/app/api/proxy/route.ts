@@ -36,7 +36,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Decode the URL if it's encoded
-    const targetUrl = decodeUrl(targetParam);
+    let targetUrl = decodeUrl(targetParam);
 
     if (!targetUrl) {
       return NextResponse.json(
@@ -45,7 +45,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Basic URL validation
+    // Smart URL handling: if it's not a valid URL, treat it as a search query
     let validUrl: URL;
     try {
       validUrl = new URL(targetUrl);
@@ -53,10 +53,26 @@ export async function GET(request: NextRequest) {
         throw new Error('Invalid protocol');
       }
     } catch {
-      return NextResponse.json(
-        { error: 'Invalid URL format' },
-        { status: 400 }
-      );
+      // If it's not a valid URL, check if it looks like a search query
+      if (!targetUrl.includes('://') && !targetUrl.startsWith('/')) {
+        // Convert search query to Google search URL
+        const searchQuery = encodeURIComponent(targetUrl);
+        targetUrl = `https://www.google.com/search?q=${searchQuery}`;
+
+        try {
+          validUrl = new URL(targetUrl);
+        } catch {
+          return NextResponse.json(
+            { error: `Invalid URL format. Failed to parse: ${targetParam}. Attempted Google search for: ${targetUrl}` },
+            { status: 400 }
+          );
+        }
+      } else {
+        return NextResponse.json(
+          { error: `Invalid URL format. Failed to parse: ${targetUrl}` },
+          { status: 400 }
+        );
+      }
     }
 
     // Educational note: These headers might help avoid some basic detection
