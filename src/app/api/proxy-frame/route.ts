@@ -125,7 +125,12 @@ function rewriteHtmlContent(content: string, originalUrl: URL, baseProxyUrl: str
         fullUrl = baseUrl + currentPath + url;
       }
 
-      const proxyUrl = createProxyUrl(fullUrl, browserAccessibleBaseUrl);
+      // Don't rewrite Google search forms - let JavaScript handle them completely
+      if (fullUrl.includes('google.com') && (fullUrl.includes('/search') || url.includes('/search'))) {
+        return match; // Keep original action, JavaScript will intercept
+      }
+
+      const proxyUrl = createProxyUrl(fullUrl, baseProxyUrl);
       return `action="${proxyUrl}"`;
     } catch {
       return match;
@@ -172,22 +177,44 @@ function rewriteHtmlContent(content: string, originalUrl: URL, baseProxyUrl: str
         fullUrl = baseUrl + currentPath + url;
       }
 
-      const proxyUrl = createProxyUrl(fullUrl, browserAccessibleBaseUrl);
+      const proxyUrl = createProxyUrl(fullUrl, baseProxyUrl);
       return `content="${delay};url=${proxyUrl}"`;
     } catch {
       return match;
     }
   });
 
-  // Add base tag for better relative URL handling
-  processedContent = processedContent.replace(/<head>/i, `<head><base href="${baseUrl}/">`);
-
   // Inject comprehensive JavaScript to handle dynamic navigation
   const injectedScript = `
     <script>
+      // IMMEDIATE form blocking - don't wait for anything
       (function() {
-        const PROXY_BASE = window.location.origin + '/api/proxy-frame?u=';
+        console.log('🚀 IMMEDIATE proxy interceptor loading...');
+
+        // Block ALL form submissions immediately
+        document.addEventListener('submit', function(e) {
+          console.log('⚡ IMMEDIATE form block triggered');
+          if (e.target.tagName === 'FORM') {
+            const form = e.target;
+            const searchInput = form.querySelector('input[name="q"]');
+            if (searchInput || window.location.href.includes('google.com')) {
+              console.log('🛑 IMMEDIATE Google form block');
+              e.preventDefault();
+              e.stopPropagation();
+              e.stopImmediatePropagation();
+              return false;
+            }
+          }
+        }, true);
+      })();
+
+      (function() {
+        const PROXY_BASE = '${baseProxyUrl}/api/proxy-frame?u=';
         const ORIGINAL_BASE = '${baseUrl}';
+
+        console.log('🔧 Proxy navigation script loaded');
+        console.log('📍 Proxy base:', PROXY_BASE);
+        console.log('🌐 Original base:', ORIGINAL_BASE);
 
         function encodeUrl(url) {
           return btoa(url).replace(/[+/=]/g, function(char) {
@@ -221,6 +248,101 @@ function rewriteHtmlContent(content: string, originalUrl: URL, baseProxyUrl: str
           }
         }
 
+        // AGGRESSIVE form submission override - must prevent ALL Google form submissions
+        function interceptFormSubmission(e) {
+          const form = e.target;
+
+          console.log('🚨 FORM SUBMISSION DETECTED:', {
+            tag: form.tagName,
+            action: form.action,
+            method: form.method,
+            hasSearchInput: !!form.querySelector('input[name="q"]'),
+            currentUrl: window.location.href,
+            eventType: e.type
+          });
+
+          if (form.tagName === 'FORM') {
+            // Check if this is ANY kind of Google search form
+            const searchInput = form.querySelector('input[name="q"]');
+            const isGoogleSearch = searchInput ||
+                                 form.action.includes('/search') ||
+                                 form.action.includes('google.com') ||
+                                 window.location.href.includes('google.com');
+
+            if (isGoogleSearch) {
+              console.log('🛑 BLOCKING Google form submission');
+              e.preventDefault();
+              e.stopPropagation();
+              e.stopImmediatePropagation();
+
+              const searchQuery = searchInput ? (searchInput.value || '') : '';
+              if (searchQuery.trim()) {
+                console.log('🔍 Redirecting search for:', searchQuery);
+                const searchUrl = 'https://www.google.com/search?q=' + encodeURIComponent(searchQuery.trim());
+                const proxyUrl = PROXY_BASE + encodeUrl(searchUrl);
+                console.log('🔄 Going to:', proxyUrl);
+
+                // Force redirect
+                setTimeout(() => {
+                  window.location.href = proxyUrl;
+                }, 50);
+              }
+              return false;
+            }
+
+            // Handle other forms normally
+            e.preventDefault();
+            const formData = new FormData(form);
+            const action = form.getAttribute('action') || window.location.href;
+            const method = form.method || 'GET';
+
+            if (method.toUpperCase() === 'GET') {
+              let targetUrl;
+              try {
+                targetUrl = new URL(action, window.location.href);
+                for (const [key, value] of formData.entries()) {
+                  targetUrl.searchParams.set(key, value);
+                }
+                const proxyUrl = createProxyUrl(targetUrl.toString());
+                window.location.href = proxyUrl;
+              } catch (e) {
+                const proxyUrl = createProxyUrl(action);
+                window.location.href = proxyUrl;
+              }
+            } else {
+              // POST forms
+              const proxyAction = createProxyUrl(action);
+              const newForm = document.createElement('form');
+              newForm.method = method;
+              newForm.action = proxyAction;
+              newForm.style.display = 'none';
+
+              for (const [key, value] of formData.entries()) {
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = key;
+                input.value = value;
+                newForm.appendChild(input);
+              }
+
+              document.body.appendChild(newForm);
+              newForm.submit();
+            }
+          }
+        }
+
+        // Add multiple event listeners to catch ALL form submissions
+        document.addEventListener('submit', interceptFormSubmission, true); // Capture phase
+        document.addEventListener('submit', interceptFormSubmission, false); // Bubble phase
+
+        // Also intercept on document ready
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', function() {
+            document.addEventListener('submit', interceptFormSubmission, true);
+            console.log('📋 Added DOMContentLoaded form interceptor');
+          });
+        }
+
         // Override link clicking
         document.addEventListener('click', function(e) {
           const link = e.target.closest('a[href]');
@@ -228,38 +350,27 @@ function rewriteHtmlContent(content: string, originalUrl: URL, baseProxyUrl: str
             const href = link.getAttribute('href');
             if (href && !href.startsWith('#') && !href.startsWith('javascript:') && !href.startsWith('mailto:') && !href.startsWith('tel:')) {
               e.preventDefault();
+
+              // Handle Google search result links specially
+              if (href.includes('/url?') && href.includes('&url=')) {
+                // Extract the actual URL from Google's redirect
+                try {
+                  const urlMatch = href.match(/[&?]url=([^&]*)/);
+                  if (urlMatch) {
+                    const actualUrl = decodeURIComponent(urlMatch[1]);
+                    const proxyUrl = createProxyUrl(actualUrl);
+                    window.location.href = proxyUrl;
+                    return;
+                  }
+                } catch (e) {
+                  console.log('Failed to extract Google redirect URL:', e);
+                }
+              }
+
+              // Handle regular links
               const proxyUrl = createProxyUrl(href);
               window.location.href = proxyUrl;
             }
-          }
-        }, true);
-
-        // Override form submissions
-        document.addEventListener('submit', function(e) {
-          const form = e.target;
-          if (form.tagName === 'FORM' && form.action) {
-            e.preventDefault();
-            const action = form.getAttribute('action') || window.location.href;
-            const proxyAction = createProxyUrl(action);
-
-            // Create a new form with the proxy action
-            const newForm = document.createElement('form');
-            newForm.method = form.method || 'GET';
-            newForm.action = proxyAction;
-            newForm.style.display = 'none';
-
-            // Copy all form data
-            const formData = new FormData(form);
-            for (const [key, value] of formData.entries()) {
-              const input = document.createElement('input');
-              input.type = 'hidden';
-              input.name = key;
-              input.value = value;
-              newForm.appendChild(input);
-            }
-
-            document.body.appendChild(newForm);
-            newForm.submit();
           }
         }, true);
 
@@ -346,8 +457,11 @@ function rewriteHtmlContent(content: string, originalUrl: URL, baseProxyUrl: str
     </script>
   `;
 
-  // Insert the navigation script and watermark
-  processedContent = processedContent.replace(/<body[^>]*>/i, (match) => match + watermark + injectedScript);
+  // Insert the navigation script IMMEDIATELY after head tag for fastest loading
+  processedContent = processedContent.replace(/<head[^>]*>/i, (match) => match + injectedScript);
+
+  // Insert watermark in body
+  processedContent = processedContent.replace(/<body[^>]*>/i, (match) => match + watermark);
 
   return processedContent;
 }
@@ -367,10 +481,38 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Decode the URL if it's encoded
-    const targetUrl = decodeUrl(targetParam);
+    // Check if this is a Google search form submission (has 'q' parameter and other Google params)
+    const searchQuery = searchParams.get('q');
+    if (searchQuery && (searchParams.has('sca_esv') || searchParams.has('source') || searchParams.has('ei'))) {
+      // This is a Google search form submission, reconstruct the proper Google search URL
+      console.log(`🔍 Detected Google search form submission: "${searchQuery}"`);
+      console.log(`📋 Search params:`, Array.from(searchParams.entries()));
 
-    // Basic URL validation
+      const googleSearchUrl = `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`;
+
+      // Redirect to the proper Google search through our proxy
+      const encodedGoogleUrl = encodeUrl(googleSearchUrl);
+      const redirectUrl = `/api/proxy-frame?u=${encodedGoogleUrl}`;
+
+      console.log(`🔄 Redirecting to: ${googleSearchUrl}`);
+
+      return new NextResponse(
+        `<html><body>
+          <script>window.location.href = '${redirectUrl}';</script>
+          <p>Redirecting to Google search for: ${searchQuery}</p>
+          <p>If not redirected, <a href="${redirectUrl}">click here</a></p>
+        </body></html>`,
+        {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' }
+        }
+      );
+    }
+
+    // Decode the URL if it's encoded
+    let targetUrl = decodeUrl(targetParam);
+
+    // Smart URL handling: if it's not a valid URL, treat it as a search query
     let validUrl: URL;
     try {
       validUrl = new URL(targetUrl);
@@ -378,13 +520,32 @@ export async function GET(request: NextRequest) {
         throw new Error('Invalid protocol');
       }
     } catch {
-      return new NextResponse(
-        `<html><body><h1>Error: Invalid URL format</h1><p>Failed to parse: ${targetUrl}</p></body></html>`,
-        {
-          status: 400,
-          headers: { 'Content-Type': 'text/html' }
+      // If it's not a valid URL, check if it looks like a search query
+      if (!targetUrl.includes('://') && !targetUrl.startsWith('/')) {
+        // Convert search query to Google search URL
+        const searchQuery = encodeURIComponent(targetUrl);
+        targetUrl = `https://www.google.com/search?q=${searchQuery}`;
+
+        try {
+          validUrl = new URL(targetUrl);
+        } catch {
+          return new NextResponse(
+            `<html><body><h1>Error: Invalid URL format</h1><p>Failed to parse: ${targetParam}</p><p>Attempted Google search for: ${targetUrl}</p></body></html>`,
+            {
+              status: 400,
+              headers: { 'Content-Type': 'text/html' }
+            }
+          );
         }
-      );
+      } else {
+        return new NextResponse(
+          `<html><body><h1>Error: Invalid URL format</h1><p>Failed to parse: ${targetUrl}</p></body></html>`,
+          {
+            status: 400,
+            headers: { 'Content-Type': 'text/html' }
+          }
+        );
+      }
     }
 
     const isGoogle = validUrl.hostname.includes('google');
@@ -429,8 +590,27 @@ export async function GET(request: NextRequest) {
     });
 
     if (!response.ok) {
+      // Provide more detailed error information
+      const statusText = response.statusText || 'Unknown Error';
+      const errorBody = await response.text().catch(() => 'No error details available');
+
       return new NextResponse(
-        `<html><body><h1>Error: Failed to fetch</h1><p>Status: ${response.status} ${response.statusText}</p><p>URL: ${targetUrl}</p></body></html>`,
+        `<html><body>
+          <h1>Proxy Error: Failed to fetch</h1>
+          <p><strong>Status:</strong> ${response.status} ${statusText}</p>
+          <p><strong>URL:</strong> ${targetUrl}</p>
+          <p><strong>Original Query:</strong> ${targetParam}</p>
+          ${errorBody ? `<p><strong>Server Response:</strong></p><pre>${errorBody.substring(0, 500)}</pre>` : ''}
+          <hr>
+          <p><small>This might be due to:</small></p>
+          <ul>
+            <li>The target website blocking proxy requests</li>
+            <li>Network connectivity issues</li>
+            <li>The website requiring special authentication</li>
+            <li>CORS or security restrictions</li>
+          </ul>
+          <p><a href="javascript:history.back()">← Go Back</a></p>
+        </body></html>`,
         {
           status: response.status,
           headers: { 'Content-Type': 'text/html' }
@@ -449,19 +629,16 @@ export async function GET(request: NextRequest) {
 
     // Process HTML content to make it work better in iframe
     let processedContent = content;
-
     if (contentType.includes('text/html')) {
-      // Comprehensive URL rewriting
-      const requestHost = request.headers.get('host') || request.nextUrl.host;
-      processedContent = rewriteHtmlContent(content, validUrl, baseProxyUrl, requestHost);
+      processedContent = rewriteHtmlContent(content, validUrl, baseProxyUrl);
+    }
 
-      // Google-specific fixes
-      if (isGoogle) {
-        // Remove some Google anti-iframe scripts
-        processedContent = processedContent.replace(/if\s*\(\s*top\s*!=\s*self\s*\)[^}]*}/gi, '');
-        processedContent = processedContent.replace(/window\.top\s*!==?\s*window\.self/gi, 'false');
-        processedContent = processedContent.replace(/parent\s*!==?\s*window/gi, 'false');
-      }
+    // Google-specific fixes
+    if (isGoogle) {
+      // Remove some Google anti-iframe scripts
+      processedContent = processedContent.replace(/if\s*\(\s*top\s*!=\s*self\s*\)[^}]*}/gi, '');
+      processedContent = processedContent.replace(/window\.top\s*!==?\s*window\.self/gi, 'false');
+      processedContent = processedContent.replace(/parent\s*!==?\s*window/gi, 'false');
     }
 
     return new NextResponse(processedContent, {
@@ -504,6 +681,29 @@ export async function POST(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const targetParam = searchParams.get('url') || searchParams.get('u') || searchParams.get('q');
+
+    // Check if this is a Google search form submission via POST
+    const searchQuery = searchParams.get('q');
+    if (searchQuery && (searchParams.has('sca_esv') || searchParams.has('source') || searchParams.has('ei'))) {
+      // This is a Google search form submission, reconstruct the proper Google search URL
+      const googleSearchUrl = `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`;
+
+      // Redirect to the proper Google search through our proxy
+      const encodedGoogleUrl = encodeUrl(googleSearchUrl);
+      const redirectUrl = `/api/proxy-frame?u=${encodedGoogleUrl}`;
+
+      return new NextResponse(
+        `<html><body>
+          <script>window.location.href = '${redirectUrl}';</script>
+          <p>Redirecting to Google search for: ${searchQuery}</p>
+          <p>If not redirected, <a href="${redirectUrl}">click here</a></p>
+        </body></html>`,
+        {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' }
+        }
+      );
+    }
 
     if (!targetParam) {
       return new NextResponse(
@@ -549,8 +749,7 @@ export async function POST(request: NextRequest) {
 
     let processedContent = content;
     if (contentType.includes('text/html')) {
-      const requestHost = request.headers.get('host') || request.nextUrl.host;
-      processedContent = rewriteHtmlContent(content, validUrl, baseProxyUrl, requestHost);
+      processedContent = rewriteHtmlContent(content, validUrl, baseProxyUrl);
     }
 
     return new NextResponse(processedContent, {
